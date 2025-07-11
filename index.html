@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bitcoin Micro-Loans</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="logo">
+                <h1>₿ Micro-Loans</h1>
+                <span class="tagline">Collateral-free loans for everyone</span>
+            </div>
+            <nav class="nav">
+                <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+                <button class="nav-btn" data-tab="borrow">Borrow</button>
+                <button class="nav-btn" data-tab="lend">Lend</button>
+                <button class="nav-btn" data-tab="profile">Profile</button>
+            </nav>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <section id="dashboard" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Total Loans</h3>
+                        <p class="stat-value" id="totalLoans">0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Amount Lent</h3>
+                        <p class="stat-value" id="totalLent">0 STX</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Amount Repaid</h3>
+                        <p class="stat-value" id="totalRepaid">0 STX</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Active Loans</h3>
+                        <p class="stat-value" id="activeLoans">0</p>
+                    </div>
+                </div>
+                
+                <div class="recent-activity">
+                    <h2>Recent Activity</h2>
+                    <div class="activity-list" id="activityList">
+                        <div class="activity-item">
+                            <div class="activity-icon">📊</div>
+                            <div class="activity-content">
+                                <p>Welcome to Bitcoin Micro-Loans</p>
+                                <span class="activity-time">Connect your wallet to get started</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="borrow" class="tab-content">
+                <div class="form-container">
+                    <h2>Request a Loan</h2>
+                    <form id="borrowForm" class="form">
+                        <div class="form-group">
+                            <label for="loanAmount">Loan Amount (STX)</label>
+                            <input type="number" id="loanAmount" min="1000" max="100000" required>
+                            <span class="form-hint">Min: 1,000 STX - Max: 100,000 STX</span>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="loanDuration">Duration (Days)</label>
+                            <select id="loanDuration" required>
+                                <option value="7">7 Days</option>
+                                <option value="14">14 Days</option>
+                                <option value="30" selected>30 Days</option>
+                                <option value="60">60 Days</option>
+                                <option value="90">90 Days</option>
+                                <option value="180">180 Days</option>
+                                <option value="365">1 Year</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="btcAddress">Bitcoin Address</label>
+                            <input type="text" id="btcAddress" placeholder="bc1..." required>
+                            <span class="form-hint">Your Bitcoin address for earnings verification</span>
+                        </div>
+                        
+                        <div class="loan-summary" id="loanSummary">
+                            <h3>Loan Summary</h3>
+                            <div class="summary-row">
+                                <span>Principal:</span>
+                                <span id="summaryPrincipal">0 STX</span>
+                            </div>
+                            <div class="summary-row">
+                                <span>Interest (5%):</span>
+                                <span id="summaryInterest">0 STX</span>
+                            </div>
+                            <div class="summary-row">
+                                <span>Platform Fee (1%):</span>
+                                <span id="summaryFee">0 STX</span>
+                            </div>
+                            <div class="summary-row total">
+                                <span>Total Due:</span>
+                                <span id="summaryTotal">0 STX</span>
+                            </div>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary">Request Loan</button>
+                    </form>
+                </div>
+            </section>
+
+            <section id="lend" class="tab-content">
+                <div class="form-container">
+                    <h2>Contribute to Lending Pool</h2>
+                    <form id="lendForm" class="form">
+                        <div class="form-group">
+                            <label for="contributionAmount">Contribution Amount (STX)</label>
+                            <input type="number" id="contributionAmount" min="100" required>
+                            <span class="form-hint">Minimum contribution: 100 STX</span>
+                        </div>
+                        
+                        <div class="lending-info">
+                            <h3>Lending Pool Information</h3>
+                            <div class="info-row">
+                                <span>Expected APR:</span>
+                                <span>5-8%</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Platform Fee:</span>
+                                <span>1%</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Risk Level:</span>
+                                <span class="risk-medium">Medium</span>
+                            </div>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary">Contribute to Pool</button>
+                    </form>
+                </div>
+            </section>
+
+            <section id="profile" class="tab-content">
+                <div class="profile-container">
+                    <h2>Your Profile</h2>
+                    
+                    <div class="profile-section">
+                        <h3>Borrower Profile</h3>
+                        <div class="profile-stats">
+                            <div class="profile-stat">
+                                <label>Reputation Score</label>
+                                <div class="reputation-bar">
+                                    <div class="reputation-fill" id="reputationFill"></div>
+                                    <span id="reputationScore">100</span>
+                                </div>
+                            </div>
+                            <div class="profile-stat">
+                                <label>Total Borrowed</label>
+                                <span id="totalBorrowed">0 STX</span>
+                            </div>
+                            <div class="profile-stat">
+                                <label>Total Repaid</label>
+                                <span id="totalRepaidProfile">0 STX</span>
+                            </div>
+                            <div class="profile-stat">
+                                <label>Active Loans</label>
+                                <span id="activeLoansProfile">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="profile-section">
+                        <h3>Register as Borrower</h3>
+                        <form id="registerForm" class="form">
+                            <div class="form-group">
+                                <label for="regBtcAddress">Bitcoin Address</label>
+                                <input type="text" id="regBtcAddress" placeholder="bc1..." required>
+                            </div>
+                            <div class="form-group">
+                                <label for="monthlyEarnings">Monthly BTC Earnings (sats)</label>
+                                <input type="number" id="monthlyEarnings" min="0" required>
+                                <span class="form-hint">Your estimated monthly Bitcoin earnings</span>
+                            </div>
+                            <button type="submit" class="btn btn-secondary">Register</button>
+                        </form>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>&copy; 2025 Bitcoin Micro-Loans. Built on Stacks blockchain.</p>
+        </div>
+    </footer>
+
+    <div class="notification" id="notification"></div>
+
+    <script src="https://unpkg.com/@stacks/connect@21.1.1/dist/umd/index.js"></script>
+    <script src="https://unpkg.com/@stacks/transactions@6.5.4/dist/umd/index.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

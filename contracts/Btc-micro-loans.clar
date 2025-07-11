@@ -1,0 +1,373 @@
+;; title: Btc-micro-loans
+;; version: 1.0
+;; summary: Collateral-free micro-loans for the unbanked, repaid via future Bitcoin earnings
+;; description: Smart contract enabling micro-loans backed by future Bitcoin earnings predictions
+
+(define-constant CONTRACT_OWNER tx-sender)
+(define-constant ERR_OWNER_ONLY (err u100))
+(define-constant ERR_INVALID_AMOUNT (err u101))
+(define-constant ERR_LOAN_NOT_FOUND (err u102))
+(define-constant ERR_LOAN_ALREADY_EXISTS (err u103))
+(define-constant ERR_INSUFFICIENT_FUNDS (err u104))
+(define-constant ERR_LOAN_EXPIRED (err u105))
+(define-constant ERR_LOAN_ALREADY_REPAID (err u106))
+(define-constant ERR_UNAUTHORIZED (err u107))
+(define-constant ERR_INVALID_DURATION (err u108))
+(define-constant ERR_MINIMUM_AMOUNT (err u109))
+(define-constant ERR_MAXIMUM_AMOUNT (err u110))
+
+(define-constant MIN_LOAN_AMOUNT u1000)
+(define-constant MAX_LOAN_AMOUNT u100000)
+(define-constant MIN_DURATION_BLOCKS u144)
+(define-constant MAX_DURATION_BLOCKS u52560)
+(define-constant INTEREST_RATE_BASIS_POINTS u500)
+(define-constant PLATFORM_FEE_BASIS_POINTS u100)
+
+(define-data-var contract-active bool true)
+(define-data-var total-loans-issued uint u0)
+(define-data-var total-amount-lent uint u0)
+(define-data-var total-amount-repaid uint u0)
+(define-data-var next-loan-id uint u1)
+
+(define-map loans
+  { loan-id: uint }
+  {
+    borrower: principal,
+    amount: uint,
+    interest-rate: uint,
+    duration-blocks: uint,
+    issue-block: uint,
+    repayment-due-block: uint,
+    amount-due: uint,
+    status: (string-ascii 20),
+    btc-address: (string-ascii 62),
+    earning-history: uint
+  }
+)
+
+(define-map borrower-profiles
+  { borrower: principal }
+  {
+    total-borrowed: uint,
+    total-repaid: uint,
+    loans-count: uint,
+    reputation-score: uint,
+    btc-earnings-last-month: uint,
+    registration-block: uint
+  }
+)
+
+(define-map lender-pool
+  { lender: principal }
+  {
+    total-contributed: uint,
+    total-earned: uint,
+    active-contributions: uint
+  }
+)
+
+(define-public (initialize-contract)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+    (var-set contract-active true)
+    (ok true)
+  )
+)
+
+(define-public (toggle-contract-status)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+    (var-set contract-active (not (var-get contract-active)))
+    (ok (var-get contract-active))
+  )
+)
+
+(define-public (register-borrower (btc-address (string-ascii 62)) (monthly-earnings uint))
+  (let
+    (
+      (borrower tx-sender)
+      (current-block u0)
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (map-set borrower-profiles
+      { borrower: borrower }
+      {
+        total-borrowed: u0,
+        total-repaid: u0,
+        loans-count: u0,
+        reputation-score: u100,
+        btc-earnings-last-month: monthly-earnings,
+        registration-block: current-block
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (contribute-to-pool (amount uint))
+  (let
+    (
+      (lender tx-sender)
+      (current-contribution (default-to 
+        {
+          total-contributed: u0,
+          total-earned: u0,
+          active-contributions: u0
+        }
+        (map-get? lender-pool { lender: lender })
+      ))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (try! (stx-transfer? amount lender (as-contract tx-sender)))
+    (map-set lender-pool
+      { lender: lender }
+      {
+        total-contributed: (+ (get total-contributed current-contribution) amount),
+        total-earned: (get total-earned current-contribution),
+        active-contributions: (+ (get active-contributions current-contribution) amount)
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (request-loan (amount uint) (duration-blocks uint) (btc-address (string-ascii 62)))
+  (let
+    (
+      (borrower tx-sender)
+      (loan-id (var-get next-loan-id))
+      (current-block u0)
+      (interest-amount (/ (* amount INTEREST_RATE_BASIS_POINTS) u10000))
+      (platform-fee (/ (* amount PLATFORM_FEE_BASIS_POINTS) u10000))
+      (total-due (+ amount interest-amount platform-fee))
+      (borrower-profile (map-get? borrower-profiles { borrower: borrower }))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (>= amount MIN_LOAN_AMOUNT) ERR_MINIMUM_AMOUNT)
+    (asserts! (<= amount MAX_LOAN_AMOUNT) ERR_MAXIMUM_AMOUNT)
+    (asserts! (>= duration-blocks MIN_DURATION_BLOCKS) ERR_INVALID_DURATION)
+    (asserts! (<= duration-blocks MAX_DURATION_BLOCKS) ERR_INVALID_DURATION)
+    (asserts! (is-some borrower-profile) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? loans { loan-id: loan-id })) ERR_LOAN_ALREADY_EXISTS)
+    
+    (map-set loans
+      { loan-id: loan-id }
+      {
+        borrower: borrower,
+        amount: amount,
+        interest-rate: INTEREST_RATE_BASIS_POINTS,
+        duration-blocks: duration-blocks,
+        issue-block: current-block,
+        repayment-due-block: (+ current-block duration-blocks),
+        amount-due: total-due,
+        status: "active",
+        btc-address: btc-address,
+        earning-history: (get btc-earnings-last-month (unwrap-panic borrower-profile))
+      }
+    )
+    
+    (try! (as-contract (stx-transfer? amount tx-sender borrower)))
+    
+    (var-set next-loan-id (+ loan-id u1))
+    (var-set total-loans-issued (+ (var-get total-loans-issued) u1))
+    (var-set total-amount-lent (+ (var-get total-amount-lent) amount))
+    
+    (match borrower-profile
+      profile (map-set borrower-profiles
+        { borrower: borrower }
+        (merge profile {
+          total-borrowed: (+ (get total-borrowed profile) amount),
+          loans-count: (+ (get loans-count profile) u1)
+        })
+      )
+      true
+    )
+    
+    (ok loan-id)
+  )
+)
+
+(define-public (repay-loan (loan-id uint))
+  (let
+    (
+      (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR_LOAN_NOT_FOUND))
+      (borrower tx-sender)
+      (current-block u0)
+      (amount-due (get amount-due loan))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (is-eq borrower (get borrower loan)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
+    
+    (try! (stx-transfer? amount-due borrower (as-contract tx-sender)))
+    
+    (map-set loans
+      { loan-id: loan-id }
+      (merge loan { status: "repaid" })
+    )
+    
+    (var-set total-amount-repaid (+ (var-get total-amount-repaid) amount-due))
+    
+    (let
+      (
+        (borrower-profile (unwrap-panic (map-get? borrower-profiles { borrower: borrower })))
+      )
+      (map-set borrower-profiles
+        { borrower: borrower }
+        (merge borrower-profile {
+          total-repaid: (+ (get total-repaid borrower-profile) amount-due),
+          reputation-score: (if (> (+ (get reputation-score borrower-profile) u10) u1000) 
+                             u1000 
+                             (+ (get reputation-score borrower-profile) u10))
+        })
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (mark-loan-defaulted (loan-id uint))
+  (let
+    (
+      (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR_LOAN_NOT_FOUND))
+      (current-block u0)
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+    (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
+    (asserts! (> current-block (get repayment-due-block loan)) ERR_LOAN_EXPIRED)
+    
+    (map-set loans
+      { loan-id: loan-id }
+      (merge loan { status: "defaulted" })
+    )
+    
+    (let
+      (
+        (borrower (get borrower loan))
+        (borrower-profile (unwrap-panic (map-get? borrower-profiles { borrower: borrower })))
+      )
+      (map-set borrower-profiles
+        { borrower: borrower }
+        (merge borrower-profile {
+          reputation-score: (if (> (get reputation-score borrower-profile) u50) 
+                             (- (get reputation-score borrower-profile) u50) 
+                             u0)
+        })
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (withdraw-earnings (amount uint))
+  (let
+    (
+      (lender tx-sender)
+      (lender-data (unwrap! (map-get? lender-pool { lender: lender }) ERR_UNAUTHORIZED))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+    (asserts! (>= (get total-earned lender-data) amount) ERR_INSUFFICIENT_FUNDS)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender lender)))
+    
+    (map-set lender-pool
+      { lender: lender }
+      (merge lender-data {
+        total-earned: (- (get total-earned lender-data) amount)
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-loan-details (loan-id uint))
+  (map-get? loans { loan-id: loan-id })
+)
+
+(define-read-only (get-borrower-profile (borrower principal))
+  (map-get? borrower-profiles { borrower: borrower })
+)
+
+(define-read-only (get-lender-profile (lender principal))
+  (map-get? lender-pool { lender: lender })
+)
+
+(define-read-only (get-contract-stats)
+  {
+    total-loans-issued: (var-get total-loans-issued),
+    total-amount-lent: (var-get total-amount-lent),
+    total-amount-repaid: (var-get total-amount-repaid),
+    next-loan-id: (var-get next-loan-id),
+    contract-active: (var-get contract-active)
+  }
+)
+
+(define-read-only (calculate-loan-health (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan (let
+      (
+        (current-block u0)
+        (blocks-remaining (if (> (get repayment-due-block loan) current-block)
+                           (- (get repayment-due-block loan) current-block)
+                           u0))
+        (blocks-elapsed (- current-block (get issue-block loan)))
+        (duration (get duration-blocks loan))
+      )
+      (if (is-eq (get status loan) "repaid")
+        { health-score: u100, status: "repaid", blocks-remaining: u0 }
+        (if (is-eq (get status loan) "defaulted")
+          { health-score: u0, status: "defaulted", blocks-remaining: u0 }
+          {
+            health-score: (/ (* blocks-remaining u100) duration),
+            status: "active",
+            blocks-remaining: blocks-remaining
+          }
+        )
+      )
+    )
+    { health-score: u0, status: "not-found", blocks-remaining: u0 }
+  )
+)
+
+(define-read-only (get-borrower-eligibility (borrower principal))
+  (let
+    (
+      (profile (map-get? borrower-profiles { borrower: borrower }))
+    )
+    (match profile
+      borrower-data
+      {
+        eligible: (and 
+          (>= (get reputation-score borrower-data) u50)
+          (> (get btc-earnings-last-month borrower-data) u0)
+        ),
+        max-loan-amount: (if (> (* (get btc-earnings-last-month borrower-data) u10) MAX_LOAN_AMOUNT) 
+                          MAX_LOAN_AMOUNT 
+                          (* (get btc-earnings-last-month borrower-data) u10)),
+        reputation-score: (get reputation-score borrower-data)
+      }
+      { eligible: false, max-loan-amount: u0, reputation-score: u0 }
+    )
+  )
+)
+
+(define-read-only (estimate-loan-cost (amount uint) (duration-blocks uint))
+  (let
+    (
+      (interest-amount (/ (* amount INTEREST_RATE_BASIS_POINTS) u10000))
+      (platform-fee (/ (* amount PLATFORM_FEE_BASIS_POINTS) u10000))
+      (total-due (+ amount interest-amount platform-fee))
+    )
+    {
+      principal: amount,
+      interest: interest-amount,
+      platform-fee: platform-fee,
+      total-due: total-due,
+      daily-payment: (/ total-due (/ duration-blocks u144))
+    }
+  )
+)
