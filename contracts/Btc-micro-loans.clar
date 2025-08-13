@@ -15,6 +15,8 @@
 (define-constant ERR_INVALID_DURATION (err u108))
 (define-constant ERR_MINIMUM_AMOUNT (err u109))
 (define-constant ERR_MAXIMUM_AMOUNT (err u110))
+(define-constant ERR_INVALID_PAYMENT_AMOUNT (err u111))
+(define-constant ERR_PAYMENT_EXCEEDS_BALANCE (err u112))
 
 (define-constant MIN_LOAN_AMOUNT u1000)
 (define-constant MAX_LOAN_AMOUNT u100000)
@@ -39,6 +41,8 @@
     issue-block: uint,
     repayment-due-block: uint,
     amount-due: uint,
+    amount-paid: uint,
+    remaining-balance: uint,
     status: (string-ascii 20),
     btc-address: (string-ascii 62),
     earning-history: uint
@@ -161,6 +165,8 @@
         issue-block: current-block,
         repayment-due-block: (+ current-block duration-blocks),
         amount-due: total-due,
+        amount-paid: u0,
+        remaining-balance: total-due,
         status: "active",
         btc-address: btc-address,
         earning-history: (get btc-earnings-last-month (unwrap-panic borrower-profile))
@@ -188,6 +194,61 @@
   )
 )
 
+(define-public (make-partial-payment (loan-id uint) (payment-amount uint))
+  (let
+    (
+      (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR_LOAN_NOT_FOUND))
+      (borrower tx-sender)
+      (current-paid (get amount-paid loan))
+      (remaining (get remaining-balance loan))
+      (new-paid (+ current-paid payment-amount))
+      (new-remaining (- remaining payment-amount))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (is-eq borrower (get borrower loan)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
+    (asserts! (> payment-amount u0) ERR_INVALID_PAYMENT_AMOUNT)
+    (asserts! (<= payment-amount remaining) ERR_PAYMENT_EXCEEDS_BALANCE)
+    
+    (try! (stx-transfer? payment-amount borrower (as-contract tx-sender)))
+    
+    (map-set loans
+      { loan-id: loan-id }
+      (merge loan {
+        amount-paid: new-paid,
+        remaining-balance: new-remaining,
+        status: (if (is-eq new-remaining u0) "repaid" "active")
+      })
+    )
+    
+    (var-set total-amount-repaid (+ (var-get total-amount-repaid) payment-amount))
+    
+    (if (is-eq new-remaining u0)
+      (let
+        (
+          (borrower-profile (unwrap-panic (map-get? borrower-profiles { borrower: borrower })))
+        )
+        (map-set borrower-profiles
+          { borrower: borrower }
+          (merge borrower-profile {
+            total-repaid: (+ (get total-repaid borrower-profile) (get amount-due loan)),
+            reputation-score: (if (> (+ (get reputation-score borrower-profile) u10) u1000) 
+                               u1000 
+                               (+ (get reputation-score borrower-profile) u10))
+          })
+        )
+      )
+      true
+    )
+    
+    (ok { 
+      amount-paid: new-paid, 
+      remaining-balance: new-remaining, 
+      fully-repaid: (is-eq new-remaining u0)
+    })
+  )
+)
+
 (define-public (repay-loan (loan-id uint))
   (let
     (
@@ -200,14 +261,18 @@
     (asserts! (is-eq borrower (get borrower loan)) ERR_UNAUTHORIZED)
     (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
     
-    (try! (stx-transfer? amount-due borrower (as-contract tx-sender)))
+    (try! (stx-transfer? (get remaining-balance loan) borrower (as-contract tx-sender)))
     
     (map-set loans
       { loan-id: loan-id }
-      (merge loan { status: "repaid" })
+      (merge loan { 
+        status: "repaid",
+        amount-paid: amount-due,
+        remaining-balance: u0
+      })
     )
     
-    (var-set total-amount-repaid (+ (var-get total-amount-repaid) amount-due))
+    (var-set total-amount-repaid (+ (var-get total-amount-repaid) (get remaining-balance loan)))
     
     (let
       (
@@ -369,5 +434,20 @@
       total-due: total-due,
       daily-payment: (/ total-due (/ duration-blocks u144))
     }
+  )
+)
+
+(define-read-only (get-payment-progress (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan
+    {
+      loan-id: loan-id,
+      amount-due: (get amount-due loan),
+      amount-paid: (get amount-paid loan),
+      remaining-balance: (get remaining-balance loan),
+      payment-percentage: (/ (* (get amount-paid loan) u100) (get amount-due loan)),
+      status: (get status loan)
+    }
+    { loan-id: loan-id, amount-due: u0, amount-paid: u0, remaining-balance: u0, payment-percentage: u0, status: "not-found" }
   )
 )
