@@ -17,6 +17,12 @@
 (define-constant ERR_MAXIMUM_AMOUNT (err u110))
 (define-constant ERR_INVALID_PAYMENT_AMOUNT (err u111))
 (define-constant ERR_PAYMENT_EXCEEDS_BALANCE (err u112))
+(define-constant ERR_INSURANCE_NOT_FOUND (err u113))
+(define-constant ERR_INSURANCE_EXPIRED (err u114))
+(define-constant ERR_CLAIM_NOT_FOUND (err u115))
+(define-constant ERR_CLAIM_ALREADY_PROCESSED (err u116))
+(define-constant ERR_INVALID_RISK_SCORE (err u117))
+(define-constant ERR_INSUFFICIENT_INSURANCE_FUNDS (err u118))
 
 (define-constant MIN_LOAN_AMOUNT u1000)
 (define-constant MAX_LOAN_AMOUNT u100000)
@@ -30,6 +36,9 @@
 (define-data-var total-amount-lent uint u0)
 (define-data-var total-amount-repaid uint u0)
 (define-data-var next-loan-id uint u1)
+(define-data-var next-insurance-id uint u1)
+(define-data-var next-claim-id uint u1)
+(define-data-var insurance-pool-balance uint u0)
 
 (define-map loans
   { loan-id: uint }
@@ -68,6 +77,16 @@
     total-earned: uint,
     active-contributions: uint
   }
+)
+
+(define-map borrower-loan-index
+  { borrower: principal, index: uint }
+  { loan-id: uint }
+)
+
+(define-map borrower-loan-count
+  { borrower: principal }
+  { count: uint }
 )
 
 (define-public (initialize-contract)
@@ -171,6 +190,15 @@
         btc-address: btc-address,
         earning-history: (get btc-earnings-last-month (unwrap-panic borrower-profile))
       }
+    )
+
+    (let
+      (
+        (count-entry (default-to { count: u0 } (map-get? borrower-loan-count { borrower: borrower })))
+        (idx (get count count-entry))
+      )
+      (map-set borrower-loan-index { borrower: borrower, index: idx } { loan-id: loan-id })
+      (map-set borrower-loan-count { borrower: borrower } { count: (+ idx u1) })
     )
     
     (try! (as-contract (stx-transfer? amount tx-sender borrower)))
@@ -449,5 +477,19 @@
       status: (get status loan)
     }
     { loan-id: loan-id, amount-due: u0, amount-paid: u0, remaining-balance: u0, payment-percentage: u0, status: "not-found" }
+  )
+)
+
+(define-read-only (get-borrower-loan-count (borrower principal))
+  (match (map-get? borrower-loan-count { borrower: borrower })
+    entry (get count entry)
+    u0
+  )
+)
+
+(define-read-only (get-borrower-loan-id-at (borrower principal) (index uint))
+  (match (map-get? borrower-loan-index { borrower: borrower, index: index })
+    entry (some (get loan-id entry))
+    none
   )
 )
