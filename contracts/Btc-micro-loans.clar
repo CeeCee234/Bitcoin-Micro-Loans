@@ -23,6 +23,10 @@
 (define-constant ERR_CLAIM_ALREADY_PROCESSED (err u116))
 (define-constant ERR_INVALID_RISK_SCORE (err u117))
 (define-constant ERR_INSUFFICIENT_INSURANCE_FUNDS (err u118))
+(define-constant ERR_REFINANCE_NOT_ELIGIBLE (err u119))
+(define-constant ERR_REFINANCE_TOO_EARLY (err u120))
+(define-constant ERR_REFINANCE_ALREADY_EXISTS (err u121))
+(define-constant ERR_NO_OUTSTANDING_BALANCE (err u122))
 
 (define-constant MIN_LOAN_AMOUNT u1000)
 (define-constant MAX_LOAN_AMOUNT u100000)
@@ -39,6 +43,8 @@
 (define-data-var next-insurance-id uint u1)
 (define-data-var next-claim-id uint u1)
 (define-data-var insurance-pool-balance uint u0)
+(define-data-var next-refinance-id uint u1)
+(define-data-var total-refinanced-loans uint u0)
 
 (define-map loans
   { loan-id: uint }
@@ -87,6 +93,26 @@
 (define-map borrower-loan-count
   { borrower: principal }
   { count: uint }
+)
+
+(define-map refinanced-loans
+  { refinance-id: uint }
+  {
+    original-loan-id: uint,
+    new-loan-id: uint,
+    borrower: principal,
+    original-balance: uint,
+    new-interest-rate: uint,
+    refinance-block: uint,
+    new-duration-blocks: uint,
+    new-amount-due: uint,
+    interest-saved: uint
+  }
+)
+
+(define-map loan-refinance-history
+  { loan-id: uint }
+  { refinance-id: uint, is-refinanced: bool }
 )
 
 (define-public (initialize-contract)
@@ -492,4 +518,221 @@
     entry (some (get loan-id entry))
     none
   )
+)
+
+(define-public (refinance-loan (loan-id uint) (new-duration-blocks uint))
+  (let
+    (
+      (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR_LOAN_NOT_FOUND))
+      (borrower tx-sender)
+      (current-block u0)
+      (borrower-profile (unwrap! (map-get? borrower-profiles { borrower: borrower }) ERR_UNAUTHORIZED))
+      (remaining-balance (get remaining-balance loan))
+      (blocks-elapsed (- current-block (get issue-block loan)))
+      (reputation (get reputation-score borrower-profile))
+      (refinance-id (var-get next-refinance-id))
+      (new-loan-id (var-get next-loan-id))
+      (existing-refinance (map-get? loan-refinance-history { loan-id: loan-id }))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (is-eq borrower (get borrower loan)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
+    (asserts! (> remaining-balance u0) ERR_NO_OUTSTANDING_BALANCE)
+    (asserts! (>= reputation u200) ERR_REFINANCE_NOT_ELIGIBLE)
+    (asserts! (>= blocks-elapsed u1440) ERR_REFINANCE_TOO_EARLY)
+    (asserts! (is-none existing-refinance) ERR_REFINANCE_ALREADY_EXISTS)
+    (asserts! (>= new-duration-blocks MIN_DURATION_BLOCKS) ERR_INVALID_DURATION)
+    (asserts! (<= new-duration-blocks MAX_DURATION_BLOCKS) ERR_INVALID_DURATION)
+    
+    (let
+      (
+        (new-interest-rate (if (>= reputation u500)
+                             u250
+                             (if (>= reputation u300)
+                               u350
+                               u400)))
+        (new-interest-amount (/ (* remaining-balance new-interest-rate) u10000))
+        (platform-fee (/ (* remaining-balance PLATFORM_FEE_BASIS_POINTS) u10000))
+        (new-total-due (+ remaining-balance new-interest-amount platform-fee))
+        (old-interest (/ (* remaining-balance INTEREST_RATE_BASIS_POINTS) u10000))
+        (interest-saved (- old-interest new-interest-amount))
+      )
+      
+      (map-set loans
+        { loan-id: loan-id }
+        (merge loan { 
+          status: "refinanced",
+          remaining-balance: u0
+        })
+      )
+      
+      (map-set loans
+        { loan-id: new-loan-id }
+        {
+          borrower: borrower,
+          amount: remaining-balance,
+          interest-rate: new-interest-rate,
+          duration-blocks: new-duration-blocks,
+          issue-block: current-block,
+          repayment-due-block: (+ current-block new-duration-blocks),
+          amount-due: new-total-due,
+          amount-paid: u0,
+          remaining-balance: new-total-due,
+          status: "active",
+          btc-address: (get btc-address loan),
+          earning-history: (get btc-earnings-last-month borrower-profile)
+        }
+      )
+      
+      (map-set refinanced-loans
+        { refinance-id: refinance-id }
+        {
+          original-loan-id: loan-id,
+          new-loan-id: new-loan-id,
+          borrower: borrower,
+          original-balance: remaining-balance,
+          new-interest-rate: new-interest-rate,
+          refinance-block: current-block,
+          new-duration-blocks: new-duration-blocks,
+          new-amount-due: new-total-due,
+          interest-saved: interest-saved
+        }
+      )
+      
+      (map-set loan-refinance-history
+        { loan-id: loan-id }
+        { refinance-id: refinance-id, is-refinanced: true }
+      )
+      
+      (let
+        (
+          (count-entry (default-to { count: u0 } (map-get? borrower-loan-count { borrower: borrower })))
+          (idx (get count count-entry))
+        )
+        (map-set borrower-loan-index { borrower: borrower, index: idx } { loan-id: new-loan-id })
+        (map-set borrower-loan-count { borrower: borrower } { count: (+ idx u1) })
+      )
+      
+      (var-set next-loan-id (+ new-loan-id u1))
+      (var-set next-refinance-id (+ refinance-id u1))
+      (var-set total-refinanced-loans (+ (var-get total-refinanced-loans) u1))
+      
+      (ok { 
+        refinance-id: refinance-id,
+        new-loan-id: new-loan-id, 
+        new-interest-rate: new-interest-rate,
+        new-amount-due: new-total-due,
+        interest-saved: interest-saved
+      })
+    )
+  )
+)
+
+(define-read-only (get-refinance-details (refinance-id uint))
+  (map-get? refinanced-loans { refinance-id: refinance-id })
+)
+
+(define-read-only (get-loan-refinance-status (loan-id uint))
+  (map-get? loan-refinance-history { loan-id: loan-id })
+)
+
+(define-read-only (check-refinance-eligibility (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan
+    (match (map-get? borrower-profiles { borrower: (get borrower loan) })
+      profile
+      (let
+        (
+          (current-block u0)
+          (blocks-elapsed (- current-block (get issue-block loan)))
+          (reputation (get reputation-score profile))
+          (remaining (get remaining-balance loan))
+          (is-active (is-eq (get status loan) "active"))
+          (not-refinanced (is-none (map-get? loan-refinance-history { loan-id: loan-id })))
+          (min-blocks-passed (>= blocks-elapsed u1440))
+        )
+        {
+          eligible: (and 
+            is-active
+            not-refinanced
+            min-blocks-passed
+            (>= reputation u200)
+            (> remaining u0)
+          ),
+          reputation-score: reputation,
+          blocks-elapsed: blocks-elapsed,
+          min-blocks-required: u1440,
+          remaining-balance: remaining,
+          estimated-new-rate: (if (>= reputation u500)
+                                u250
+                                (if (>= reputation u300)
+                                  u350
+                                  u400)),
+          current-rate: (get interest-rate loan)
+        }
+      )
+      { 
+        eligible: false, 
+        reputation-score: u0, 
+        blocks-elapsed: u0, 
+        min-blocks-required: u1440, 
+        remaining-balance: u0,
+        estimated-new-rate: u0,
+        current-rate: u0
+      }
+    )
+    { 
+      eligible: false, 
+      reputation-score: u0, 
+      blocks-elapsed: u0, 
+      min-blocks-required: u1440, 
+      remaining-balance: u0,
+      estimated-new-rate: u0,
+      current-rate: u0
+    }
+  )
+)
+
+(define-read-only (estimate-refinance-savings (loan-id uint) (new-duration-blocks uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan
+    (match (map-get? borrower-profiles { borrower: (get borrower loan) })
+      profile
+      (let
+        (
+          (remaining (get remaining-balance loan))
+          (reputation (get reputation-score profile))
+          (new-rate (if (>= reputation u500)
+                      u250
+                      (if (>= reputation u300)
+                        u350
+                        u400)))
+          (old-interest (/ (* remaining INTEREST_RATE_BASIS_POINTS) u10000))
+          (new-interest (/ (* remaining new-rate) u10000))
+          (interest-saved (- old-interest new-interest))
+          (platform-fee (/ (* remaining PLATFORM_FEE_BASIS_POINTS) u10000))
+          (new-total-due (+ remaining new-interest platform-fee))
+        )
+        (some {
+          original-balance: remaining,
+          old-interest-rate: INTEREST_RATE_BASIS_POINTS,
+          new-interest-rate: new-rate,
+          old-interest-amount: old-interest,
+          new-interest-amount: new-interest,
+          interest-saved: interest-saved,
+          new-total-due: new-total-due,
+          savings-percentage: (/ (* interest-saved u100) old-interest)
+        })
+      )
+      none
+    )
+    none
+  )
+)
+
+(define-read-only (get-refinance-stats)
+  {
+    total-refinanced-loans: (var-get total-refinanced-loans),
+    next-refinance-id: (var-get next-refinance-id)
+  }
 )
