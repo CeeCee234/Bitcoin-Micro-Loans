@@ -27,6 +27,10 @@
 (define-constant ERR_REFINANCE_TOO_EARLY (err u120))
 (define-constant ERR_REFINANCE_ALREADY_EXISTS (err u121))
 (define-constant ERR_NO_OUTSTANDING_BALANCE (err u122))
+(define-constant ERR_GRACE_PERIOD_ACTIVE (err u123))
+(define-constant ERR_MAX_EXTENSIONS_REACHED (err u124))
+(define-constant ERR_LOAN_NOT_ELIGIBLE (err u125))
+(define-constant ERR_EXTENSION_NOT_FOUND (err u126))
 
 (define-constant MIN_LOAN_AMOUNT u1000)
 (define-constant MAX_LOAN_AMOUNT u100000)
@@ -34,6 +38,9 @@
 (define-constant MAX_DURATION_BLOCKS u52560)
 (define-constant INTEREST_RATE_BASIS_POINTS u500)
 (define-constant PLATFORM_FEE_BASIS_POINTS u100)
+(define-constant GRACE_PERIOD_BLOCKS u1440)
+(define-constant MAX_GRACE_EXTENSIONS u2)
+(define-constant GRACE_EXTENSION_FEE_BASIS_POINTS u50)
 
 (define-data-var contract-active bool true)
 (define-data-var total-loans-issued uint u0)
@@ -45,6 +52,8 @@
 (define-data-var insurance-pool-balance uint u0)
 (define-data-var next-refinance-id uint u1)
 (define-data-var total-refinanced-loans uint u0)
+(define-data-var next-extension-id uint u1)
+(define-data-var total-extensions-granted uint u0)
 
 (define-map loans
   { loan-id: uint }
@@ -113,6 +122,24 @@
 (define-map loan-refinance-history
   { loan-id: uint }
   { refinance-id: uint, is-refinanced: bool }
+)
+
+(define-map grace-period-extensions
+  { extension-id: uint }
+  {
+    loan-id: uint,
+    borrower: principal,
+    extension-block: uint,
+    original-due-block: uint,
+    new-due-block: uint,
+    extension-fee: uint,
+    extension-number: uint
+  }
+)
+
+(define-map loan-extension-count
+  { loan-id: uint }
+  { count: uint }
 )
 
 (define-public (initialize-contract)
@@ -734,5 +761,116 @@
   {
     total-refinanced-loans: (var-get total-refinanced-loans),
     next-refinance-id: (var-get next-refinance-id)
+  }
+)
+
+(define-public (request-grace-period-extension (loan-id uint))
+  (let
+    (
+      (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR_LOAN_NOT_FOUND))
+      (borrower tx-sender)
+      (current-block u0)
+      (extension-id (var-get next-extension-id))
+      (current-extensions (default-to { count: u0 } (map-get? loan-extension-count { loan-id: loan-id })))
+      (extension-count (get count current-extensions))
+      (remaining-balance (get remaining-balance loan))
+      (extension-fee (/ (* remaining-balance GRACE_EXTENSION_FEE_BASIS_POINTS) u10000))
+      (current-due-block (get repayment-due-block loan))
+      (new-due-block (+ current-due-block GRACE_PERIOD_BLOCKS))
+    )
+    (asserts! (var-get contract-active) ERR_OWNER_ONLY)
+    (asserts! (is-eq borrower (get borrower loan)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status loan) "active") ERR_LOAN_ALREADY_REPAID)
+    (asserts! (> remaining-balance u0) ERR_NO_OUTSTANDING_BALANCE)
+    (asserts! (< extension-count MAX_GRACE_EXTENSIONS) ERR_MAX_EXTENSIONS_REACHED)
+
+    (try! (stx-transfer? extension-fee borrower (as-contract tx-sender)))
+
+    (map-set loans
+      { loan-id: loan-id }
+      (merge loan {
+        repayment-due-block: new-due-block,
+        amount-due: (+ (get amount-due loan) extension-fee),
+        remaining-balance: (+ remaining-balance extension-fee)
+      })
+    )
+
+    (map-set grace-period-extensions
+      { extension-id: extension-id }
+      {
+        loan-id: loan-id,
+        borrower: borrower,
+        extension-block: current-block,
+        original-due-block: current-due-block,
+        new-due-block: new-due-block,
+        extension-fee: extension-fee,
+        extension-number: (+ extension-count u1)
+      }
+    )
+
+    (map-set loan-extension-count
+      { loan-id: loan-id }
+      { count: (+ extension-count u1) }
+    )
+
+    (var-set next-extension-id (+ extension-id u1))
+    (var-set total-extensions-granted (+ (var-get total-extensions-granted) u1))
+
+    (ok {
+      extension-id: extension-id,
+      new-due-block: new-due-block,
+      extension-fee: extension-fee,
+      extensions-remaining: (- MAX_GRACE_EXTENSIONS (+ extension-count u1))
+    })
+  )
+)
+
+(define-read-only (get-extension-details (extension-id uint))
+  (map-get? grace-period-extensions { extension-id: extension-id })
+)
+
+(define-read-only (get-loan-extension-count (loan-id uint))
+  (match (map-get? loan-extension-count { loan-id: loan-id })
+    entry (get count entry)
+    u0
+  )
+)
+
+(define-read-only (check-extension-eligibility (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan
+    (let
+      (
+        (extension-count (get-loan-extension-count loan-id))
+        (remaining (get remaining-balance loan))
+        (is-active (is-eq (get status loan) "active"))
+        (has-balance (> remaining u0))
+        (extensions-available (< extension-count MAX_GRACE_EXTENSIONS))
+        (extension-fee (/ (* remaining GRACE_EXTENSION_FEE_BASIS_POINTS) u10000))
+      )
+      {
+        eligible: (and is-active has-balance extensions-available),
+        current-extensions: extension-count,
+        max-extensions: MAX_GRACE_EXTENSIONS,
+        extensions-remaining: (- MAX_GRACE_EXTENSIONS extension-count),
+        estimated-fee: extension-fee,
+        extension-duration-blocks: GRACE_PERIOD_BLOCKS
+      }
+    )
+    {
+      eligible: false,
+      current-extensions: u0,
+      max-extensions: MAX_GRACE_EXTENSIONS,
+      extensions-remaining: u0,
+      estimated-fee: u0,
+      extension-duration-blocks: GRACE_PERIOD_BLOCKS
+    }
+  )
+)
+
+(define-read-only (get-extension-stats)
+  {
+    total-extensions-granted: (var-get total-extensions-granted),
+    next-extension-id: (var-get next-extension-id)
   }
 )
